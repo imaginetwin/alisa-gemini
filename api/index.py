@@ -5,15 +5,14 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler
 
-# Подхватываем ключ в новом формате AQ. (или старом, если остался)
 RAW_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_KEY") or ""
 GEMINI_KEY = RAW_KEY.strip().strip('"').strip("'")
 
 RAW_SERPER = os.environ.get("SERPER_API_KEY") or os.environ.get("SERPER_KEY") or ""
 SERPER_KEY = RAW_SERPER.strip().strip('"').strip("'")
 
-# Используем стабильный эндпоинт v1beta с поддержкой новых ключей через заголовки
-API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+# Используем самую актуальную модель для новых ключей AQ.
+API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 MAX_HISTORY = 6
 
 def clip(text, max_length=700):
@@ -44,7 +43,7 @@ def serper_search(query):
 
 def ask_gemini(message, history, search_context=""):
     if not GEMINI_KEY:
-        return "В настройках Vercel не найден ключ API."
+        return "В настройках Vercel не найден ключ GEMINI_API_KEY."
 
     contents = []
     for item in history:
@@ -65,7 +64,6 @@ def ask_gemini(message, history, search_context=""):
         "generationConfig": {"temperature": 0.5, "maxOutputTokens": 180}
     }
 
-    # Передаем новый ключ AQ. исключительно через заголовок безопасности x-goog-api-key
     req = urllib.request.Request(
         API_URL,
         data=json.dumps(payload).encode("utf-8"),

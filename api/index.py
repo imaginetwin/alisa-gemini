@@ -5,13 +5,14 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler
 
-# Подхватываем ключ из любой переменной и убираем случайные пробелы
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY", os.environ.get("GEMINI_KEY", "")).strip()
-SERPER_KEY = os.environ.get("SERPER_API_KEY", os.environ.get("SERPER_KEY", "")).strip()
+# 1. Берем ключ и ЖЕСТКО вычищаем любые пробелы, кавычки и невидимые символы
+RAW_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_KEY") or ""
+GEMINI_KEY = re.sub(r"[^a-zA-Z0-9_\-]", "", RAW_KEY)
 
-# Список моделей по приоритету (если первая выдаст 404, код сам найдет рабочую)
-PREFERRED_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
-CACHED_MODEL = None
+RAW_SERPER = os.environ.get("SERPER_API_KEY") or os.environ.get("SERPER_KEY") or ""
+SERPER_KEY = re.sub(r"[^a-zA-Z0-9_\-]", "", RAW_SERPER)
+
+CACHED_ENDPOINT = None
 MAX_HISTORY = 6
 
 def clip(text, max_length=700):
@@ -34,49 +35,68 @@ def serper_search(query):
         method="POST"
     )
     try:
-        # Жесткий таймаут 1.2 сек, чтобы успеть ответить Яндексу
         with urllib.request.urlopen(req, timeout=1.2) as r:
             results = json.loads(r.read().decode("utf-8")).get("organic", [])
             return "\n".join(f"{i.get('title')}: {i.get('snippet')}" for i in results)[:1200]
     except Exception:
         return ""
 
-def find_working_model():
-    """Автоматически запрашивает у Google список доступных моделей для вашего ключа."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_KEY}"
-    try:
-        with urllib.request.urlopen(urllib.request.Request(url), timeout=1.5) as r:
-            data = json.loads(r.read().decode("utf-8"))
-            avail = [
-                m["name"].replace("models/", "")
-                for m in data.get("models", [])
-                if "generateContent" in m.get("supportedGenerationMethods", [])
-            ]
-            for pref in PREFERRED_MODELS:
-                if pref in avail:
-                    return pref
-            for m in avail:
-                if "flash" in m or "gemini" in m:
-                    return m
-            return avail[0] if avail else None
-    except Exception:
-        return None
+def get_candidate_endpoints():
+    """Собирает список рабочих URL: сначала проверяет аккаунт, затем стандартные."""
+    endpoints = []
+    # Запрашиваем точные имена моделей у Google, передавая ключ через заголовок
+    for ver in ["v1beta", "v1"]:
+        try:
+            req = urllib.request.Request(
+                f"https://generativelanguage.googleapis.com/{ver}/models",
+                headers={"x-goog-api-key": GEMINI_KEY}
+            )
+            with urllib.request.urlopen(req, timeout=1.5) as r:
+                data = json.loads(r.read().decode("utf-8"))
+                for m in data.get("models", []):
+                    methods = m.get("supportedGenerationMethods", [])
+                    name = m.get("name", "") # Уже в формате 'models/...'
+                    if "generateContent" in methods and "gemini" in name:
+                        # Отдаем приоритет быстрым flash-моделям
+                        url = f"https://generativelanguage.googleapis.com/{ver}/{name}:generateContent"
+                        if "flash" in name and "8b" not in name:
+                            endpoints.insert(0, url)
+                        else:
+                            endpoints.append(url)
+                if endpoints:
+                    break
+        except Exception:
+            continue
 
-def call_model(model_name, payload):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_KEY}"
+    # Резервные прямые ссылки на случай сбоя списка
+    fallbacks = [
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+        "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+    ]
+    for fb in fallbacks:
+        if fb not in endpoints:
+            endpoints.append(fb)
+    return endpoints
+
+def call_endpoint(url, payload):
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": GEMINI_KEY  # Ключ в заголовке — URL больше не ломается!
+        },
         method="POST"
     )
-    with urllib.request.urlopen(req, timeout=2.6) as r:
+    with urllib.request.urlopen(req, timeout=2.5) as r:
         data = json.loads(r.read().decode("utf-8"))
         parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
         return clip("".join(p.get("text", "") for p in parts))
 
 def ask_gemini(message, history, search_context=""):
-    global CACHED_MODEL
+    global CACHED_ENDPOINT
     if not GEMINI_KEY:
         return "В настройках Vercel не найден ключ API."
 
@@ -99,26 +119,34 @@ def ask_gemini(message, history, search_context=""):
         "generationConfig": {"temperature": 0.5, "maxOutputTokens": 180}
     }
 
-    model_to_use = CACHED_MODEL or PREFERRED_MODELS[0]
+    # Если мы уже нашли рабочий эндпоинт ранее, бьем сразу в него
+    if CACHED_ENDPOINT:
+        try:
+            ans = call_endpoint(CACHED_ENDPOINT, payload)
+            if ans:
+                return ans
+        except Exception:
+            CACHED_ENDPOINT = None
 
-    try:
-        answer = call_model(model_to_use, payload)
-        CACHED_MODEL = model_to_use
-        return answer or "Не удалось сформулировать ответ."
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            # Если модель не найдена — автоматически ищем доступную на аккаунте
-            real_model = find_working_model()
-            if real_model:
-                try:
-                    CACHED_MODEL = real_model
-                    return call_model(real_model, payload)
-                except Exception as inner_e:
-                    return f"Модель {real_model} найдена, но выдала сбой: {str(inner_e)[:80]}"
-            return "Ошибка 404: для вашего API ключа не найдено доступных текстовых моделей."
-        return f"Ошибка доступа к Google API (код {e.code}). Проверьте ключ."
-    except Exception:
-        return "Запрос занял слишком много времени, повторите вопрос покороче."
+    # Перебираем доступные модели, пока одна из них не ответит 200 OK
+    last_err = ""
+    for url in get_candidate_endpoints()[:4]:
+        try:
+            ans = call_endpoint(url, payload)
+            if ans:
+                CACHED_ENDPOINT = url
+                return ans
+        except urllib.error.HTTPError as e:
+            err_body = ""
+            try:
+                err_body = e.read().decode("utf-8")[:120]
+            except Exception:
+                pass
+            last_err = f"HTTP {e.code} ({err_body})"
+        except Exception as e:
+            last_err = str(e)[:80]
+
+    return f"Не удалось получить ответ. Детали: {last_err}"
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -130,14 +158,12 @@ class handler(BaseHTTPRequestHandler):
             req = body.get("request", {})
             session = body.get("session", {})
             
-            # Правильное извлечение памяти из запроса Яндекса
             history = body.get("state", {}).get("session", {}).get("history", [])
             if not isinstance(history, list):
                 history = []
 
             q = clip(req.get("original_utterance") or req.get("command") or "")
 
-            # Приветствие при запуске навыка
             if session.get("new") and not q:
                 self.send_yandex("Слушаю вас, сэр.", session, [], body)
                 return
@@ -150,12 +176,10 @@ class handler(BaseHTTPRequestHandler):
                 self.send_yandex("pong", session, history, body)
                 return
 
-            # Поиск в интернете сработает только если в Vercel добавлен SERPER_API_KEY
             search_data = serper_search(q) if (SERPER_KEY and needs_search(q)) else ""
             answer = ask_gemini(q, history, search_data)
 
-            # Сохраняем контекст только при успешном ответе
-            if not answer.startswith(("Ошибка", "Запрос занял", "В настройках")):
+            if not answer.startswith(("Не удалось", "В настройках")):
                 history.append({"role": "user", "text": q})
                 history.append({"role": "model", "text": answer})
                 history = history[-MAX_HISTORY:]

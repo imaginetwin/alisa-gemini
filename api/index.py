@@ -5,14 +5,15 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler
 
-# 1. Берем ключ и ЖЕСТКО вычищаем любые пробелы, кавычки и невидимые символы
+# Подхватываем ключ в новом формате AQ. (или старом, если остался)
 RAW_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_KEY") or ""
-GEMINI_KEY = re.sub(r"[^a-zA-Z0-9_\-]", "", RAW_KEY)
+GEMINI_KEY = RAW_KEY.strip().strip('"').strip("'")
 
 RAW_SERPER = os.environ.get("SERPER_API_KEY") or os.environ.get("SERPER_KEY") or ""
-SERPER_KEY = re.sub(r"[^a-zA-Z0-9_\-]", "", RAW_SERPER)
+SERPER_KEY = RAW_SERPER.strip().strip('"').strip("'")
 
-CACHED_ENDPOINT = None
+# Используем стабильный эндпоинт v1beta с поддержкой новых ключей через заголовки
+API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 MAX_HISTORY = 6
 
 def clip(text, max_length=700):
@@ -41,62 +42,7 @@ def serper_search(query):
     except Exception:
         return ""
 
-def get_candidate_endpoints():
-    """Собирает список рабочих URL: сначала проверяет аккаунт, затем стандартные."""
-    endpoints = []
-    # Запрашиваем точные имена моделей у Google, передавая ключ через заголовок
-    for ver in ["v1beta", "v1"]:
-        try:
-            req = urllib.request.Request(
-                f"https://generativelanguage.googleapis.com/{ver}/models",
-                headers={"x-goog-api-key": GEMINI_KEY}
-            )
-            with urllib.request.urlopen(req, timeout=1.5) as r:
-                data = json.loads(r.read().decode("utf-8"))
-                for m in data.get("models", []):
-                    methods = m.get("supportedGenerationMethods", [])
-                    name = m.get("name", "") # Уже в формате 'models/...'
-                    if "generateContent" in methods and "gemini" in name:
-                        # Отдаем приоритет быстрым flash-моделям
-                        url = f"https://generativelanguage.googleapis.com/{ver}/{name}:generateContent"
-                        if "flash" in name and "8b" not in name:
-                            endpoints.insert(0, url)
-                        else:
-                            endpoints.append(url)
-                if endpoints:
-                    break
-        except Exception:
-            continue
-
-    # Резервные прямые ссылки на случай сбоя списка
-    fallbacks = [
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
-        "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent",
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
-    ]
-    for fb in fallbacks:
-        if fb not in endpoints:
-            endpoints.append(fb)
-    return endpoints
-
-def call_endpoint(url, payload):
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "x-goog-api-key": GEMINI_KEY  # Ключ в заголовке — URL больше не ломается!
-        },
-        method="POST"
-    )
-    with urllib.request.urlopen(req, timeout=2.5) as r:
-        data = json.loads(r.read().decode("utf-8"))
-        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-        return clip("".join(p.get("text", "") for p in parts))
-
 def ask_gemini(message, history, search_context=""):
-    global CACHED_ENDPOINT
     if not GEMINI_KEY:
         return "В настройках Vercel не найден ключ API."
 
@@ -119,34 +65,27 @@ def ask_gemini(message, history, search_context=""):
         "generationConfig": {"temperature": 0.5, "maxOutputTokens": 180}
     }
 
-    # Если мы уже нашли рабочий эндпоинт ранее, бьем сразу в него
-    if CACHED_ENDPOINT:
-        try:
-            ans = call_endpoint(CACHED_ENDPOINT, payload)
-            if ans:
-                return ans
-        except Exception:
-            CACHED_ENDPOINT = None
+    # Передаем новый ключ AQ. исключительно через заголовок безопасности x-goog-api-key
+    req = urllib.request.Request(
+        API_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": GEMINI_KEY
+        },
+        method="POST"
+    )
 
-    # Перебираем доступные модели, пока одна из них не ответит 200 OK
-    last_err = ""
-    for url in get_candidate_endpoints()[:4]:
-        try:
-            ans = call_endpoint(url, payload)
-            if ans:
-                CACHED_ENDPOINT = url
-                return ans
-        except urllib.error.HTTPError as e:
-            err_body = ""
-            try:
-                err_body = e.read().decode("utf-8")[:120]
-            except Exception:
-                pass
-            last_err = f"HTTP {e.code} ({err_body})"
-        except Exception as e:
-            last_err = str(e)[:80]
-
-    return f"Не удалось получить ответ. Детали: {last_err}"
+    try:
+        with urllib.request.urlopen(req, timeout=4.0) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+            return clip("".join(p.get("text", "") for p in parts))
+    except urllib.error.HTTPError as e:
+        err_message = e.read().decode("utf-8", errors="ignore")[:150]
+        return f"Ошибка API {e.code}: {err_message}"
+    except Exception as e:
+        return f"Сбой связи: {str(e)[:80]}"
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -179,7 +118,7 @@ class handler(BaseHTTPRequestHandler):
             search_data = serper_search(q) if (SERPER_KEY and needs_search(q)) else ""
             answer = ask_gemini(q, history, search_data)
 
-            if not answer.startswith(("Не удалось", "В настройках")):
+            if not answer.startswith(("Ошибка API", "В настройках", "Сбой связи")):
                 history.append({"role": "user", "text": q})
                 history.append({"role": "model", "text": answer})
                 history = history[-MAX_HISTORY:]

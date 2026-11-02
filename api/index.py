@@ -2,7 +2,7 @@ import json, os, urllib.request
 from http.server import BaseHTTPRequestHandler
 
 KEY = os.environ.get("GEMINI_KEY", "")
-API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={KEY}"
+API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={KEY}"
 SYSTEM = "Ты голосовой помощник в колонке. Отвечай коротко и по-русски."
 
 def gemini(q):

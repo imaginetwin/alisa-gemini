@@ -1,9 +1,9 @@
 import json, os, urllib.request
 from http.server import BaseHTTPRequestHandler
 
-# Подхватит любое из двух названий ключа
 KEY = os.environ.get("GEMINI_API_KEY", os.environ.get("GEMINI_KEY", ""))
-API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={KEY}"
+# Железно используем самую стабильную модель
+API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={KEY}"
 
 def gemini(q, history):
     if not KEY:
@@ -11,13 +11,12 @@ def gemini(q, history):
     
     # Собираем историю прошлых сообщений для памяти
     contents = [{"role": msg["role"], "parts": [{"text": msg["text"]}]} for msg in history]
-    # Добавляем текущий вопрос
-    contents.append({"role": "user", "parts": [{"text": q}]})
+    
+    # Добавляем скрытую инструкцию прямо в текущий вопрос
+    prompt = f"Отвечай как голосовой помощник Алиса, коротко и по-русски. Вопрос: {q}"
+    contents.append({"role": "user", "parts": [{"text": prompt}]})
 
-    payload = {
-        "system_instruction": {"parts": [{"text": "Ты голосовой помощник Алиса. Отвечай коротко, по-русски, без списков и markdown-разметки."}]},
-        "contents": contents
-    }
+    payload = {"contents": contents}
     
     req = urllib.request.Request(API_URL, data=json.dumps(payload).encode('utf-8'), headers={"Content-Type": "application/json"})
     
@@ -25,7 +24,7 @@ def gemini(q, history):
         with urllib.request.urlopen(req, timeout=6.0) as r:
             answer = json.loads(r.read().decode('utf-8'))["candidates"][0]["content"]["parts"][0]["text"].strip()
             
-            # Обновляем историю диалога (храним последние 6 реплик, чтобы не перегружать Яндекс)
+            # Сохраняем в память чистый вопрос (без инструкции) и ответ
             history.append({"role": "user", "text": q})
             history.append({"role": "model", "text": answer})
             return answer, history[-6:]
@@ -47,7 +46,6 @@ class handler(BaseHTTPRequestHandler):
         else:
             text, new_history = "Слушаю.", history
         
-        # Упаковываем ответ и обновленную память
         res = {
             "version": "1.0",
             "response": {"text": text[:1024], "end_session": False},

@@ -29,7 +29,7 @@ SERPER_KEY = (
 # GEMINI SETTINGS
 # =========================
 
-GEMINI_MODEL = "gemini-3.8-flash"
+GEMINI_MODEL = "gemini-3.5-flash-lite"
 
 API_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/"

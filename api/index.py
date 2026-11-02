@@ -139,7 +139,7 @@ def serper_search(query):
 
         with urllib.request.urlopen(
             request,
-            timeout=5.0
+            timeout=1.0
         ) as response:
 
             data = json.loads(
@@ -306,7 +306,7 @@ def ask_gemini(
 
         with urllib.request.urlopen(
             request,
-            timeout=15.0
+            timeout=3.0
         ) as response:
 
             data = json.loads(

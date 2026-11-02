@@ -39,7 +39,7 @@ API_URL = (
     f"models/{GEMINI_MODEL}:generateContent"
 )
 
-MAX_HISTORY = 6
+MAX_HISTORY = 4
 
 
 # =========================
@@ -282,10 +282,12 @@ def ask_gemini(
         "contents": contents,
 
         "generationConfig": {
-            "temperature": 0.5,
-            "maxOutputTokens": 180
-        }
+    "temperature": 0.5,
+    "maxOutputTokens": 120,
+    "thinkingConfig": {
+        "thinkingLevel": "MINIMAL"
     }
+}
 
     request = urllib.request.Request(
         API_URL,

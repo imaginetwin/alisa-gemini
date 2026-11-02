@@ -1,6 +1,8 @@
+
 import json
 import os
 import re
+import time
 import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler
@@ -10,22 +12,17 @@ from http.server import BaseHTTPRequestHandler
 # ENVIRONMENT VARIABLES
 # =========================
 
-RAW_GEMINI_KEY = (
+GEMINI_KEY = (
     os.environ.get("GEMINI_API_KEY")
     or os.environ.get("GEMINI_KEY")
     or ""
-)
+).strip().strip('"').strip("'")
 
-GEMINI_KEY = RAW_GEMINI_KEY.strip().strip('"').strip("'")
-
-
-RAW_SERPER_KEY = (
+SERPER_KEY = (
     os.environ.get("SERPER_API_KEY")
     or os.environ.get("SERPER_KEY")
     or ""
-)
-
-SERPER_KEY = RAW_SERPER_KEY.strip().strip('"').strip("'")
+).strip().strip('"').strip("'")
 
 
 # =========================
@@ -40,6 +37,8 @@ API_URL = (
 )
 
 MAX_HISTORY = 4
+GEMINI_TIMEOUT = 3.0
+SERPER_TIMEOUT = 0.8
 
 
 # =========================
@@ -47,7 +46,6 @@ MAX_HISTORY = 4
 # =========================
 
 def clip(text, max_length=700):
-    """Очищает и ограничивает текст."""
     return re.sub(
         r"\s+",
         " ",
@@ -56,12 +54,14 @@ def clip(text, max_length=700):
 
 
 def clean_for_tts(text):
-    """Убирает Markdown и лишние символы для голосового ответа."""
-
     text = str(text or "")
 
     text = re.sub(r"[*_`#]", "", text)
-    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(
+        r"\[([^\]]+)\]\([^)]+\)",
+        r"\1",
+        text
+    )
 
     return clip(text, 900)
 
@@ -71,9 +71,6 @@ def clean_for_tts(text):
 # =========================
 
 def needs_search(text):
-    """
-    Проверяет, нужна ли актуальная информация.
-    """
 
     keywords = [
         "сегодня",
@@ -113,7 +110,6 @@ def needs_search(text):
 # =========================
 
 def serper_search(query):
-    """Получает свежую информацию через Serper."""
 
     if not SERPER_KEY:
         return ""
@@ -139,7 +135,7 @@ def serper_search(query):
 
         with urllib.request.urlopen(
             request,
-            timeout=1.0
+            timeout=SERPER_TIMEOUT
         ) as response:
 
             data = json.loads(
@@ -163,7 +159,7 @@ def serper_search(query):
 
         return "\n".join(
             formatted_results
-        )[:4000]
+        )[:2500]
 
     except urllib.error.HTTPError as error:
 
@@ -193,16 +189,14 @@ def ask_gemini(
     history,
     search_context=""
 ):
-    """Отправляет запрос в Gemini."""
 
     if not GEMINI_KEY:
 
         return (
             "В настройках Vercel "
-            "не найден ключ GEMINI_API_KEY."
+            "не найден ключ Gemini API."
         )
 
-    # История разговора
     contents = []
 
     for item in history:
@@ -213,42 +207,31 @@ def ask_gemini(
         role = item.get("role")
         text = item.get("text")
 
-        if (
-            role in ["user", "model"]
-            and text
-        ):
+        if role in ["user", "model"] and text:
 
             contents.append({
                 "role": role,
-                "parts": [
-                    {
-                        "text": clip(
-                            text,
-                            400
-                        )
-                    }
-                ]
+                "parts": [{
+                    "text": clip(text, 300)
+                }]
             })
 
-    # Инструкция для ассистента
     prompt = """
 Ты голосовой ассистент Джарвис.
 
-Отвечай на русском языке, если пользователь не говорит на другом языке.
+Отвечай на русском языке, если пользователь
+не говорит на другом языке.
 
 Правила:
-- Отвечай кратко: обычно от одного до трёх предложений.
-- Ответ должен естественно звучать при голосовом озвучивании.
+- Отвечай кратко, обычно 1-3 предложения.
+- Естественно звучать при голосовом озвучивании.
 - Не используй Markdown.
-- Не используй звёздочки.
 - Не используй ссылки.
 - Не используй длинные списки.
 - Не повторяй вопрос пользователя.
-- Не говори лишних вступительных фраз.
-- Старайся отвечать прямо и понятно.
+- Отвечай прямо и понятно.
 """
 
-    # Добавляем свежую информацию из поиска
     if search_context:
 
         prompt += f"""
@@ -257,8 +240,8 @@ def ask_gemini(
 
 {search_context}
 
-Используй эту информацию только если она относится к вопросу пользователя.
-Не придумывай актуальные факты, которых нет в предоставленных данных.
+Используй её, если она относится к вопросу.
+Не придумывай актуальные факты.
 """
 
     prompt += f"""
@@ -268,93 +251,80 @@ def ask_gemini(
 {message}
 """
 
-    # Добавляем текущий запрос
     contents.append({
         "role": "user",
-        "parts": [
-            {
-                "text": prompt
-            }
-        ]
+        "parts": [{
+            "text": prompt
+        }]
     })
 
     payload = {
         "contents": contents,
-
         "generationConfig": {
-    "temperature": 0.5,
-    "maxOutputTokens": 120,
-    "thinkingConfig": {
-        "thinkingLevel": "MINIMAL"
+            "temperature": 0.5,
+            "maxOutputTokens": 120
+        }
     }
-}
 
     request = urllib.request.Request(
         API_URL,
-
-        data=json.dumps(
-            payload
-        ).encode("utf-8"),
-
+        data=json.dumps(payload).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
             "x-goog-api-key": GEMINI_KEY
         },
-
         method="POST"
     )
 
-    try:
+    # Один дополнительный запрос при временном сбое.
+    # Общий лимит времени всё равно ограничен Яндексом.
 
-        with urllib.request.urlopen(
-            request,
-            timeout=3.0
-        ) as response:
-
-            data = json.loads(
-                response.read().decode("utf-8")
-            )
-
-        candidates = data.get(
-            "candidates",
-            []
-        )
-
-        if not candidates:
-
-            print(
-                "Gemini returned no candidates:",
-                data
-            )
-
-            return (
-                "Не удалось сформировать ответ."
-            )
-
-        parts = (
-            candidates[0]
-            .get("content", {})
-            .get("parts", [])
-        )
-
-        answer = "".join(
-            part.get("text", "")
-            for part in parts
-        )
-
-        answer = clean_for_tts(answer)
-
-        if not answer:
-
-            return (
-                "Не удалось сформировать ответ."
-            )
-
-        return answer
-
-    except urllib.error.HTTPError as error:
+    for attempt in range(2):
 
         try:
+
+            with urllib.request.urlopen(
+                request,
+                timeout=GEMINI_TIMEOUT
+            ) as response:
+
+                data = json.loads(
+                    response.read().decode("utf-8")
+                )
+
+            candidates = data.get(
+                "candidates",
+                []
+            )
+
+            if not candidates:
+
+                print(
+                    "Gemini returned no candidates:",
+                    data
+                )
+
+                return "Не удалось сформировать ответ."
+
+            parts = (
+                candidates[0]
+                .get("content", {})
+                .get("parts", [])
+            )
+
+            answer = "".join(
+                part.get("text", "")
+                for part in parts
+            )
+
+            answer = clean_for_tts(answer)
+
+            if not answer:
+                return "Не удалось сформировать ответ."
+
+            return answer
+
+        except urllib.error.HTTPError as error:
 
             error_body = error.read().decode(
                 "utf-8",
@@ -367,30 +337,32 @@ def ask_gemini(
                 error_body
             )
 
-        except Exception:
+            if (
+                error.code in [429, 500, 502, 503, 504]
+                and attempt == 0
+            ):
 
-            print(
-                "Gemini HTTP error:",
-                error.code
+                time.sleep(0.15)
+                continue
+
+            return (
+                "Сервис временно недоступен. "
+                "Попробуйте ещё раз."
             )
 
-        # Пользователю не показываем технические ошибки API
-        return (
-            "Сейчас не удалось получить ответ. "
-            "Попробуйте ещё раз."
-        )
+        except Exception as error:
 
-    except Exception as error:
+            print(
+                "Gemini error:",
+                str(error)
+            )
 
-        print(
-            "Gemini error:",
-            str(error)
-        )
+            return (
+                "Сейчас не удалось получить ответ. "
+                "Попробуйте ещё раз."
+            )
 
-        return (
-            "Сейчас не удалось получить ответ. "
-            "Попробуйте ещё раз."
-        )
+    return "Сейчас не удалось получить ответ."
 
 
 # =========================
@@ -431,10 +403,9 @@ class handler(BaseHTTPRequestHandler):
             )
 
             # =========================
-            # SESSION CONTEXT
+            # SESSION HISTORY
             # =========================
 
-            # Яндекс возвращает session_state
             session_state = body.get(
                 "state",
                 {}
@@ -448,7 +419,6 @@ class handler(BaseHTTPRequestHandler):
                 []
             )
 
-            # Дополнительная совместимость
             if not history:
 
                 history = body.get(
@@ -459,56 +429,33 @@ class handler(BaseHTTPRequestHandler):
                     []
                 )
 
-            if not isinstance(
-                history,
-                list
-            ):
-
+            if not isinstance(history, list):
                 history = []
 
-            # Очищаем историю
             clean_history = []
 
             for item in history:
 
                 if (
                     isinstance(item, dict)
-                    and item.get("role")
-                    in ["user", "model"]
-                    and isinstance(
-                        item.get("text"),
-                        str
-                    )
+                    and item.get("role") in ["user", "model"]
+                    and isinstance(item.get("text"), str)
                 ):
 
                     clean_history.append({
-
                         "role": item["role"],
-
-                        "text": clip(
-                            item["text"],
-                            400
-                        )
+                        "text": clip(item["text"], 300)
                     })
 
-            history = clean_history[
-                -MAX_HISTORY:
-            ]
+            history = clean_history[-MAX_HISTORY:]
 
             # =========================
             # USER MESSAGE
             # =========================
 
             question = clip(
-
-                request_data.get(
-                    "original_utterance"
-                )
-
-                or request_data.get(
-                    "command"
-                )
-
+                request_data.get("original_utterance")
+                or request_data.get("command")
                 or ""
             )
 
@@ -516,16 +463,13 @@ class handler(BaseHTTPRequestHandler):
             # FIRST LAUNCH
             # =========================
 
-            if (
-                session.get("new")
-                and not question
-            ):
+            if session.get("new") and not question:
 
                 self.send_yandex(
-                    text="Слушаю вас, сэр.",
-                    session=session,
-                    history=[],
-                    body=body
+                    "Слушаю вас, сэр.",
+                    session,
+                    [],
+                    body
                 )
 
                 return
@@ -537,54 +481,46 @@ class handler(BaseHTTPRequestHandler):
             if not question:
 
                 self.send_yandex(
-                    text="Я вас слушаю.",
-                    session=session,
-                    history=history,
-                    body=body
+                    "Я вас слушаю.",
+                    session,
+                    history,
+                    body
                 )
 
                 return
 
             # =========================
-            # TEST PING
+            # PING
             # =========================
 
             if question.lower() == "ping":
 
                 self.send_yandex(
-                    text="pong",
-                    session=session,
-                    history=history,
-                    body=body
+                    "pong",
+                    session,
+                    history,
+                    body
                 )
 
                 return
 
             # =========================
-            # SERPER SEARCH
+            # SERPER
             # =========================
 
             search_context = ""
 
-            if (
-                SERPER_KEY
-                and needs_search(question)
-            ):
+            if SERPER_KEY and needs_search(question):
 
-                search_context = serper_search(
-                    question
-                )
+                search_context = serper_search(question)
 
             # =========================
             # GEMINI
             # =========================
 
             answer = ask_gemini(
-
                 message=question,
-
                 history=history,
-
                 search_context=search_context
             )
 
@@ -595,50 +531,33 @@ class handler(BaseHTTPRequestHandler):
             error_prefixes = (
                 "В настройках Vercel",
                 "Сейчас не удалось",
-                "Не удалось сформировать"
+                "Не удалось сформировать",
+                "Сервис временно недоступен"
             )
 
-            if not answer.startswith(
-                error_prefixes
-            ):
+            if not answer.startswith(error_prefixes):
 
                 history.append({
-
                     "role": "user",
-
-                    "text": clip(
-                        question,
-                        400
-                    )
+                    "text": clip(question, 300)
                 })
 
                 history.append({
-
                     "role": "model",
-
-                    "text": clip(
-                        answer,
-                        400
-                    )
+                    "text": clip(answer, 300)
                 })
 
-                history = history[
-                    -MAX_HISTORY:
-                ]
+                history = history[-MAX_HISTORY:]
 
             # =========================
             # SEND RESPONSE
             # =========================
 
             self.send_yandex(
-
-                text=answer,
-
-                session=session,
-
-                history=history,
-
-                body=body
+                answer,
+                session,
+                history,
+                body
             )
 
         except Exception as error:
@@ -649,88 +568,53 @@ class handler(BaseHTTPRequestHandler):
             )
 
             self.send_yandex(
-
-                text=(
-                    "Произошла техническая ошибка. "
-                    "Попробуйте ещё раз."
-                ),
-
-                session=body.get(
-                    "session",
-                    {}
-                ),
-
-                history=[],
-
-                body=body
+                "Произошла техническая ошибка. Попробуйте ещё раз.",
+                body.get("session", {}),
+                [],
+                body
             )
-
 
     # =========================
     # RESPONSE TO YANDEX
     # =========================
 
     def send_yandex(
-
         self,
-
         text,
-
         session,
-
         history,
-
         body
     ):
 
         text = clean_for_tts(text)
 
         response_data = {
-
-            "version": body.get(
-                "version",
-                "1.0"
-            ),
-
+            "version": body.get("version", "1.0"),
             "session": session,
-
             "response": {
-
                 "text": text[:1024],
-
                 "tts": text[:1024],
-
                 "end_session": False
             },
-
-            # Контекст для следующего запроса
             "session_state": {
-
                 "history": history
             }
         }
 
         output = json.dumps(
-
             response_data,
-
             ensure_ascii=False
-
         ).encode("utf-8")
 
         self.send_response(200)
 
         self.send_header(
-
             "Content-Type",
-
             "application/json; charset=utf-8"
         )
 
         self.send_header(
-
             "Content-Length",
-
             str(len(output))
         )
 
